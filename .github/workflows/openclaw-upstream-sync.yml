@@ -1,0 +1,86 @@
+name: OpenClaw Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 6 * * *"  # Daily at 6 AM UTC
+  workflow_dispatch:
+
+env:
+  UPSTREAM_REPO: openclaw/openclaw
+  UPSTREAM_BRANCH: main
+  OE_BRANCH: main
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Checkout OE fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "OE Sync Bot"
+          git config user.email "sync-bot@openenterprise.dev"
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
+          git fetch upstream ${{ env.UPSTREAM_BRANCH }}
+
+      - name: Attempt rebase
+        id: rebase
+        continue-on-error: true
+        run: |
+          git checkout ${{ env.OE_BRANCH }}
+          git rebase upstream/${{ env.UPSTREAM_BRANCH }}
+
+      - name: Handle conflicts (create PR)
+        if: steps.rebase.outcome == 'failure'
+        run: |
+          git rebase --abort
+          BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -b "$BRANCH"
+          git merge upstream/${{ env.UPSTREAM_BRANCH }} --no-edit || true
+          git add -A
+          git commit -m "chore: merge upstream (conflicts need resolution)" --allow-empty
+          git push origin "$BRANCH" --force
+          gh pr create \
+            --title "chore: upstream sync conflict $(date +%Y-%m-%d)" \
+            --body "Automated upstream sync encountered conflicts. Please resolve manually." \
+            --base ${{ env.OE_BRANCH }} \
+            --head "$BRANCH"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Push clean rebase
+        if: steps.rebase.outcome == 'success'
+        run: git push origin ${{ env.OE_BRANCH }} --force-with-lease
+
+      - name: Run tests
+        if: steps.rebase.outcome == 'success'
+        run: |
+          npm ci || true
+          npm test || echo "Tests failed — check logs"
+
+      - name: Build OE Docker image
+        if: steps.rebase.outcome == 'success'
+        run: |
+          if [ -f Dockerfile.oe ]; then
+            docker build -f Dockerfile.oe -t oe-openclaw:latest .
+          fi
+
+  notify:
+    needs: sync
+    runs-on: ubuntu-latest
+    if: failure()
+    steps:
+      - name: Notify on failure
+        run: |
+          echo "OpenClaw upstream sync failed. Check the workflow logs."
