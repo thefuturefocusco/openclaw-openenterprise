@@ -1,9 +1,17 @@
 FROM ghcr.io/thefuturefocusco/openclaw:latest
 
-# Create OpenClaw config for Render (non-loopback) deployment
 USER root
 RUN mkdir -p /home/node/.openclaw && \
-    echo '{"gateway":{"controlUi":{"dangerouslyAllowHostHeader":true},"port":8080,"bind":"lan"}}' > /home/node/.openclaw/openclaw.json && \
+    printf '{
+  "gateway": {
+    "port": 8080,
+    "bind": "lan",
+    "controlUi": {
+      "allowedOrigins": ["https://oe-oc-cmme0urv4000.onrender.com"],
+      "dangerouslyAllowHostHeaderOriginFallback": true
+    }
+  }
+}' > /home/node/.openclaw/openclaw.json && \
     chown -R node:node /home/node/.openclaw
 USER node
 
