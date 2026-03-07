@@ -1,0 +1,3 @@
+FROM ghcr.io/thefuturefocusco/openclaw:latest
+EXPOSE 8080
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan", "--port", "8080"]
