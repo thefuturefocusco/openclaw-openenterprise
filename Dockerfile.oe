@@ -1,3 +1,11 @@
 FROM ghcr.io/thefuturefocusco/openclaw:latest
+
+# Create OpenClaw config for Render (non-loopback) deployment
+USER root
+RUN mkdir -p /home/node/.openclaw && \
+    echo '{"gateway":{"controlUi":{"dangerouslyAllowHostHeader":true},"port":8080,"bind":"lan"}}' > /home/node/.openclaw/openclaw.json && \
+    chown -R node:node /home/node/.openclaw
+USER node
+
 EXPOSE 8080
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured", "--bind", "lan", "--port", "8080"]
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
