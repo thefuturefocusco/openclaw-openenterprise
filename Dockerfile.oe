@@ -1,8 +1,26 @@
 FROM ghcr.io/thefuturefocusco/openclaw:latest
 
 USER root
-RUN mkdir -p /home/node/.openclaw && echo '{"gateway":{"port":8080,"bind":"lan","controlUi":{"allowedOrigins":["https://oe-oc-cmme0urv4000.onrender.com"],"dangerouslyAllowHostHeaderOriginFallback":true}}}' > /home/node/.openclaw/openclaw.json && chown -R node:node /home/node/.openclaw
+RUN mkdir -p /home/node/.openclaw && printf '%s\n' \
+  '{' \
+  '  "gateway": {' \
+  '    "port": 8080,' \
+  '    "bind": "lan",' \
+  '    "controlUi": {' \
+  '      "allowedOrigins": ["https://oe-oc-cmme0urv4000.onrender.com"],' \
+  '      "dangerouslyAllowHostHeaderOriginFallback": true' \
+  '    }' \
+  '  },' \
+  '  "agents": {' \
+  '    "defaults": {' \
+  '      "model": {' \
+  '        "primary": "anthropic/claude-opus-4-20250514"' \
+  '      },' \
+  '      "workspace": "/data/workspace"' \
+  '    }' \
+  '  }' \
+  '}' > /home/node/.openclaw/openclaw.json && chown -R node:node /home/node/.openclaw
 USER node
 
 EXPOSE 8080
-CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
+CMD ["node", "openclaw.mjs", "gateway"]
