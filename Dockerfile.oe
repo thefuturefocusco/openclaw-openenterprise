@@ -1,5 +1,7 @@
 FROM ghcr.io/thefuturefocusco/openclaw:latest
 
+USER root
+RUN mkdir -p /home/node/.openclaw && chown -R node:node /home/node/.openclaw
 COPY --chown=node:node entrypoint-oe.sh /app/entrypoint-oe.sh
 RUN chmod +x /app/entrypoint-oe.sh
 
