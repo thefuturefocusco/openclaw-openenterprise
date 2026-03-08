@@ -6,6 +6,11 @@ RUN mkdir -p /home/node/.openclaw && printf '%s\n' \
   '  "gateway": {' \
   '    "port": 8080,' \
   '    "bind": "lan",' \
+  '    "http": {' \
+  '      "endpoints": {' \
+  '        "chatCompletions": { "enabled": true }' \
+  '      }' \
+  '    },' \
   '    "controlUi": {' \
   '      "allowedOrigins": ["https://oe-oc-cmme0urv4000.onrender.com"],' \
   '      "dangerouslyAllowHostHeaderOriginFallback": true' \
