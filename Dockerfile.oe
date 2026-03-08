@@ -13,14 +13,16 @@ RUN mkdir -p /home/node/.openclaw && printf '%s\n' \
   '  },' \
   '  "agents": {' \
   '    "defaults": {' \
+  '      "models": {' \
+  '        "anthropic/claude-opus-4-20250514": {}' \
+  '      },' \
   '      "model": {' \
   '        "primary": "anthropic/claude-opus-4-20250514"' \
-  '      },' \
-  '      "workspace": "/data/workspace"' \
+  '      }' \
   '    }' \
   '  }' \
   '}' > /home/node/.openclaw/openclaw.json && chown -R node:node /home/node/.openclaw
 USER node
 
 EXPOSE 8080
-CMD ["node", "openclaw.mjs", "gateway"]
+CMD ["node", "openclaw.mjs", "gateway", "--allow-unconfigured"]
