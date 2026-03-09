@@ -8,7 +8,11 @@ on:
 env:
   UPSTREAM_REPO: openclaw/openclaw
   UPSTREAM_BRANCH: main
-  OE_BRANCH: main
+  FORK_BRANCH: main
+
+concurrency:
+  group: openclaw-upstream-sync-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -16,9 +20,10 @@ jobs:
     permissions:
       contents: write
       pull-requests: write
+      issues: write
 
     steps:
-      - name: Checkout OE fork
+      - name: Checkout fork
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -26,61 +31,219 @@ jobs:
 
       - name: Configure git
         run: |
-          git config user.name "OE Sync Bot"
-          git config user.email "sync-bot@openenterprise.dev"
+          git config user.name "OpenClaw Sync Bot"
+          git config user.email "sync-bot@openclaw.dev"
 
       - name: Add upstream remote
         run: |
           git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git || true
           git fetch upstream ${{ env.UPSTREAM_BRANCH }}
 
-      - name: Attempt rebase
-        id: rebase
-        continue-on-error: true
+      - name: Attempt upstream sync
+        id: sync_attempt
+        shell: bash
         run: |
-          git checkout ${{ env.OE_BRANCH }}
-          git rebase upstream/${{ env.UPSTREAM_BRANCH }}
+          set -euo pipefail
+          git checkout "${FORK_BRANCH}"
 
-      - name: Handle conflicts (create PR)
-        if: steps.rebase.outcome == 'failure'
-        run: |
-          git rebase --abort
-          BRANCH="sync/upstream-$(date +%Y%m%d)"
-          git checkout -b "$BRANCH"
-          git merge upstream/${{ env.UPSTREAM_BRANCH }} --no-edit || true
-          git add -A
-          git commit -m "chore: merge upstream (conflicts need resolution)" --allow-empty
-          git push origin "$BRANCH" --force
-          gh pr create \
-            --title "chore: upstream sync conflict $(date +%Y-%m-%d)" \
-            --body "Automated upstream sync encountered conflicts. Please resolve manually." \
-            --base ${{ env.OE_BRANCH }} \
-            --head "$BRANCH"
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          set +e
+          git rebase "upstream/${UPSTREAM_BRANCH}"
+          rebase_exit=$?
+          set -e
 
-      - name: Push clean rebase
-        if: steps.rebase.outcome == 'success'
-        run: git push origin ${{ env.OE_BRANCH }} --force-with-lease
-
-      - name: Run tests
-        if: steps.rebase.outcome == 'success'
-        run: |
-          npm ci || true
-          npm test || echo "Tests failed — check logs"
-
-      - name: Build OE Docker image
-        if: steps.rebase.outcome == 'success'
-        run: |
-          if [ -f Dockerfile.oe ]; then
-            docker build -f Dockerfile.oe -t oe-openclaw:latest .
+          if [ "$rebase_exit" -eq 0 ]; then
+            echo "status=clean" >> "$GITHUB_OUTPUT"
+            {
+              echo "## Upstream sync rebased cleanly"
+              echo ""
+              echo "Rebase succeeded. The workflow will preserve fork-specific workflow files, run tests, and push back to \`${FORK_BRANCH}\`."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 0
           fi
 
-  notify:
-    needs: sync
-    runs-on: ubuntu-latest
-    if: failure()
-    steps:
-      - name: Notify on failure
+          conflicts="$(git diff --name-only --diff-filter=U || true)"
+          git rebase --abort
+
+          {
+            echo "status=conflict"
+            echo "conflicts<<EOF"
+            printf "%s\n" "$conflicts"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Clean up old sync branches
+        if: steps.sync_attempt.outputs.status != 'clean'
+        shell: bash
         run: |
-          echo "OpenClaw upstream sync failed. Check the workflow logs."
+          set -euo pipefail
+          TODAY="sync/upstream-$(date +%Y%m%d)"
+          while read -r ref; do
+            [ -z "$ref" ] && continue
+            branch="${ref#origin/}"
+            if [ "$branch" != "$TODAY" ]; then
+              echo "Deleting stale branch $branch"
+              if ! git push origin --delete "$branch"; then
+                echo "::warning::Failed to delete stale branch $branch"
+              fi
+            fi
+          done < <(git for-each-ref --format='%(refname:short)' 'refs/remotes/origin/sync/upstream-*')
+
+      - name: Create conflict handoff branch
+        if: steps.sync_attempt.outputs.status != 'clean'
+        id: handoff
+        shell: bash
+        env:
+          CONFLICTS: ${{ steps.sync_attempt.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          BRANCH="sync/upstream-$(date +%Y%m%d)"
+          git checkout -B "$BRANCH" "origin/${FORK_BRANCH}"
+
+          set +e
+          git merge "upstream/${UPSTREAM_BRANCH}" --no-commit --no-ff
+          merge_exit=$?
+          set -e
+
+          merge_conflicts="$(git diff --name-only --diff-filter=U || true)"
+          final_conflicts="${merge_conflicts:-$CONFLICTS}"
+
+          # Preserve fork-specific workflows; GITHUB_TOKEN cannot push workflow updates.
+          git rm -rf .github/workflows/ 2>/dev/null || true
+          git checkout "origin/${FORK_BRANCH}" -- .github/workflows/ 2>/dev/null || true
+
+          git add -A
+          git commit -m "chore: upstream sync requires manual resolution" --allow-empty
+          git push origin "$BRANCH" --force
+
+          {
+            echo "branch=$BRANCH"
+            echo "branch_url=https://github.com/${GITHUB_REPOSITORY}/tree/$BRANCH"
+            echo "conflicts<<EOF"
+            printf "%s\n" "$final_conflicts"
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create PR or issue for manual resolution
+        if: steps.sync_attempt.outputs.status != 'clean'
+        id: escalation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ steps.handoff.outputs.branch }}
+          BRANCH_URL: ${{ steps.handoff.outputs.branch_url }}
+          CONFLICTS: ${{ steps.handoff.outputs.conflicts }}
+        run: |
+          set -euo pipefail
+          DATE="$(date +%Y-%m-%d)"
+
+          conflicts_block="$(printf '%s\n' "$CONFLICTS" | sed '/^$/d' | head -n 25)"
+          if [ -z "$conflicts_block" ]; then
+            conflicts_block="(no conflict file list captured)"
+          fi
+
+          body="$(printf '%s\n' \
+            '## Automated upstream sync could not complete' \
+            '' \
+            "Branch: [$BRANCH]($BRANCH_URL)" \
+            "Upstream: \`${UPSTREAM_REPO}@${UPSTREAM_BRANCH}\`" \
+            "Base: \`${FORK_BRANCH}\`" \
+            '' \
+            'The bot could not complete a clean rebase, so it pushed a handoff branch for manual resolution.' \
+            '' \
+            '## Conflicts detected' \
+            '```text' \
+            "$conflicts_block" \
+            '```')"
+
+          existing_pr="$(gh pr list --head "$BRANCH" --base "${FORK_BRANCH}" --state open --json url --jq '.[0].url' || true)"
+          if [ -n "$existing_pr" ]; then
+            echo "kind=pr" >> "$GITHUB_OUTPUT"
+            echo "url=$existing_pr" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          set +e
+          pr_url="$(gh api "repos/${GITHUB_REPOSITORY}/pulls" \
+            -X POST \
+            -f title="chore: upstream sync handoff ${DATE}" \
+            -f head="$BRANCH" \
+            -f base="${FORK_BRANCH}" \
+            --raw-field body="$body" \
+            --jq '.html_url' 2>pr_error.txt)"
+          pr_exit=$?
+          set -e
+
+          if [ "$pr_exit" -eq 0 ] && [ -n "$pr_url" ]; then
+            echo "kind=pr" >> "$GITHUB_OUTPUT"
+            echo "url=$pr_url" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          pr_error="$(tr '\n' ' ' < pr_error.txt | sed 's/  */ /g')"
+          issue_title="Upstream sync requires manual resolution ${DATE}"
+          issue_body="$(printf '%s\n' \
+            "$body" \
+            '' \
+            '## PR creation fallback' \
+            'Automatic PR creation was blocked, so this issue was opened instead.' \
+            '' \
+            'Error:' \
+            "\`$pr_error\`")"
+
+          existing_issue="$(gh issue list --search "\"${issue_title}\" in:title" --state open --json url --jq '.[0].url' || true)"
+          if [ -n "$existing_issue" ]; then
+            echo "kind=issue" >> "$GITHUB_OUTPUT"
+            echo "url=$existing_issue" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          issue_url="$(gh api "repos/${GITHUB_REPOSITORY}/issues" \
+            -X POST \
+            -f title="$issue_title" \
+            --raw-field body="$issue_body" \
+            --jq '.html_url')"
+
+          echo "kind=issue" >> "$GITHUB_OUTPUT"
+          echo "url=$issue_url" >> "$GITHUB_OUTPUT"
+
+      - name: Preserve fork workflows before validation
+        if: steps.sync_attempt.outputs.status == 'clean'
+        shell: bash
+        run: |
+          set -euo pipefail
+          git checkout "origin/${FORK_BRANCH}" -- .github/workflows/
+          if ! git diff --quiet -- .github/workflows/; then
+            git add .github/workflows/
+            git commit -m "chore: preserve fork-specific workflows during upstream sync"
+          fi
+
+      - name: Run tests
+        if: steps.sync_attempt.outputs.status == 'clean'
+        run: |
+          npm ci
+          npm test
+
+      - name: Push clean rebase
+        if: steps.sync_attempt.outputs.status == 'clean'
+        run: git push origin ${{ env.FORK_BRANCH }} --force-with-lease
+
+      - name: Summarize manual resolution handoff
+        if: steps.sync_attempt.outputs.status != 'clean'
+        shell: bash
+        env:
+          ESCALATION_KIND: ${{ steps.escalation.outputs.kind }}
+          ESCALATION_URL: ${{ steps.escalation.outputs.url }}
+          BRANCH: ${{ steps.handoff.outputs.branch }}
+        run: |
+          {
+            echo "## Upstream sync requires manual resolution"
+            echo ""
+            echo "- Handoff branch: \`${BRANCH}\`"
+            echo "- Follow-up ${ESCALATION_KIND}: ${ESCALATION_URL}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mark sync as requiring manual intervention
+        if: steps.sync_attempt.outputs.status != 'clean'
+        run: |
+          echo "::error::OpenClaw upstream sync requires manual resolution. See the workflow summary and generated follow-up."
+          exit 1
