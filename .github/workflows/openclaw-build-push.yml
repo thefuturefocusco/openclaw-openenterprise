@@ -18,7 +18,7 @@ on:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/openclaw
+  IMAGE_NAME: ${{ github.repository_owner }}/openclaw-openenterprise
 
 jobs:
   build-and-push:
