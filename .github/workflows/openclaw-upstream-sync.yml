@@ -2,13 +2,14 @@ name: OpenClaw Upstream Sync
 
 on:
   schedule:
-    - cron: "0 6 * * *"  # Daily at 6 AM UTC
+    - cron: "0 6 * * *"
   workflow_dispatch:
 
 env:
   UPSTREAM_REPO: openclaw/openclaw
   UPSTREAM_BRANCH: main
   FORK_BRANCH: main
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
 
 concurrency:
   group: openclaw-upstream-sync-${{ github.ref }}
@@ -217,12 +218,28 @@ jobs:
             git commit -m "chore: preserve fork-specific workflows during upstream sync"
           fi
 
-      - name: Run tests
+      - name: Setup Node.js 24
         if: steps.sync_attempt.outputs.status == 'clean'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24.x"
+
+      - name: Setup pnpm
+        if: steps.sync_attempt.outputs.status == 'clean'
+        shell: bash
         run: |
           corepack enable
-          pnpm install --frozen-lockfile
-          pnpm test
+          corepack prepare pnpm@latest --activate
+
+      - name: Install dependencies
+        if: steps.sync_attempt.outputs.status == 'clean'
+        run: pnpm install --frozen-lockfile
+
+      - name: Run tests
+        if: steps.sync_attempt.outputs.status == 'clean'
+        env:
+          NODE_OPTIONS: --max-old-space-size=6144
+        run: pnpm test
 
       - name: Push clean rebase
         if: steps.sync_attempt.outputs.status == 'clean'
